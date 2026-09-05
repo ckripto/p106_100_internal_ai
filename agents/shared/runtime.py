@@ -39,6 +39,7 @@ class AgentSettings:
     task_limit: int = 1800
     snapshot_limit: int = 3000
     instruction_paths: tuple[Path, ...] = ()
+    enforce_instruction_reads: bool = False
     excluded_names: frozenset[str] = field(default_factory=frozenset)
     redundant_path_prefix: str | None = None
     ssh_target: str | None = None
@@ -65,6 +66,20 @@ def build_tools(chunk_size):
     text = {"type": "string"}
     reason = {"type": "string", "maxLength": 200}
     return [
+        _tool(
+            "edit_file",
+            "Atomically replace exact text in an existing file. The old text must occur "
+            "exactly expected_replacements times. Read the target first. Prefer this over "
+            "rewriting a large file.",
+            {
+                "path": text,
+                "old": {"type": "string", "minLength": 1, "maxLength": chunk_size},
+                "new": {"type": "string", "maxLength": chunk_size},
+                "expected_replacements": {"type": "integer", "minimum": 1},
+                "reason": reason,
+            },
+            ["path", "old", "new", "expected_replacements"],
+        ),
         _tool(
             "write_file",
             f"Stage a file in chunks <={chunk_size} characters. Start offset=0; "
@@ -109,6 +124,9 @@ class ToolState:
         self.failures = set()
         self.receipts = []
         self.effects = 0
+        self.completed_observations = set()
+        self.read_ranges = {}
+        self.read_ends = {}
 
     def prepare(self):
         self.settings.root.mkdir(parents=True, exist_ok=True)
@@ -150,6 +168,82 @@ class ToolState:
         with self.safe_path(relative_path).open(encoding="utf-8") as stream:
             stream.read(offset)
             return stream.read(self.settings.chunk_size + 1)
+
+    def _read_all(self, relative_path):
+        with self.safe_path(relative_path).open(encoding="utf-8") as stream:
+            content = stream.read(self.settings.staging_limit + 1)
+        if len(content) > self.settings.staging_limit:
+            raise ProtocolError("File exceeds edit limit")
+        return content
+
+    def observation_key(self, data):
+        name = data.get("tool")
+        arguments = data.get("arguments", {})
+        if name == "list_files":
+            return "list_files"
+        if name == "read_file":
+            path = self.path_key(string(arguments, "path", 240))
+            offset = arguments.get("offset")
+            if type(offset) is not int or offset < 0:
+                return None
+            return f"read_file:{path}@{offset}"
+        return None
+
+    def record_observation(self, key):
+        if key:
+            self.completed_observations.add(key)
+
+    def reset_observations(self):
+        self.completed_observations.clear()
+
+    def _record_read(self, key, offset, next_offset, eof):
+        ranges = sorted(self.read_ranges.get(key, []) + [(offset, next_offset)])
+        merged = []
+        for start, end in ranges:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        self.read_ranges[key] = merged
+        if eof:
+            self.read_ends[key] = next_offset
+
+    def _fully_read(self, key):
+        end = self.read_ends.get(key)
+        ranges = self.read_ranges.get(key, [])
+        return end is not None and bool(ranges) and ranges[0][0] == 0 and ranges[0][1] >= end
+
+    def _required_instruction(self, key):
+        if not self.settings.enforce_instruction_reads:
+            return None
+        root = self.settings.root.resolve()
+        directory = self.safe_path(key).parent
+        loaded = {
+            path.resolve()
+            for path in self.settings.instruction_paths
+            if path.exists() and path.resolve().is_relative_to(root)
+        }
+        while directory.is_relative_to(root):
+            candidate = directory / "AGENTS.md"
+            if candidate.is_file():
+                if candidate.resolve() in loaded:
+                    return None
+                return str(candidate.resolve().relative_to(root))
+            if directory == root:
+                break
+            directory = directory.parent
+        return None
+
+    def _require_instruction_read(self, key):
+        instruction = self._required_instruction(key)
+        if instruction and not self._fully_read(instruction):
+            raise ProtocolError(
+                f"Read the complete nearest instruction file {instruction} before modifying {key}"
+            )
+
+    def _require_file_read(self, key):
+        if key not in self.read_ranges:
+            raise ProtocolError(f"Read {key} before editing it")
 
     def _run_process(self, arguments, cwd):
         process = subprocess.Popen(
@@ -239,12 +333,46 @@ class ToolState:
             result = self._run_command(command)
             self.commands.append({"command": command, **result})
             self.effects += 1
+            self.reset_observations()
             return result
         if name == "list_files":
             self.effects += 1
             return self._list_files()
 
         key = self.path_key(string(arguments, "path", 240))
+        if name == "edit_file":
+            self._require_instruction_read(key)
+            self._require_file_read(key)
+            if key in self.pending:
+                raise ProtocolError("Finish or discard the pending write before editing the file")
+            old = string(arguments, "old", self.settings.chunk_size)
+            new = string(arguments, "new", self.settings.chunk_size, allow_empty=True)
+            expected = arguments.get("expected_replacements")
+            if type(expected) is not int or expected < 1:
+                raise ProtocolError("expected_replacements must be a positive integer")
+            if old == new:
+                raise ProtocolError("Edit must change the file")
+            source = self._read_all(key)
+            actual = source.count(old)
+            if actual != expected:
+                raise ProtocolError(
+                    f"Expected {expected} exact replacement(s), found {actual}; read the file and retry"
+                )
+            updated = source.replace(old, new)
+            if len(updated) > self.settings.staging_limit:
+                raise ProtocolError("Edited file exceeds staging limit")
+            self._write_file(key, updated)
+            if key not in self.files:
+                self.files.append(key)
+            self.effects += 1
+            self.reset_observations()
+            return {
+                "success": True,
+                "path": key,
+                "replacements": actual,
+                "size": len(updated),
+            }
+
         offset = arguments.get("offset")
         if type(offset) is not int or offset < 0:
             raise ProtocolError("offset must be a nonnegative integer")
@@ -256,13 +384,15 @@ class ToolState:
             else:
                 content = self._read_file(key, offset)
             self.effects += 1
-            return {
+            result = {
                 "success": True,
                 "path": key,
                 "content": content[:self.settings.chunk_size],
                 "next_offset": offset + min(len(content), self.settings.chunk_size),
                 "eof": len(content) <= self.settings.chunk_size,
             }
+            self._record_read(key, offset, result["next_offset"], result["eof"])
+            return result
 
         content = string(arguments, "content", self.settings.chunk_size, allow_empty=True)
         if type(arguments["final"]) is not bool:
@@ -270,6 +400,7 @@ class ToolState:
         if key not in self.pending and len(self.pending) >= self.settings.pending_file_limit:
             raise ProtocolError("Publish pending files before starting another file")
         previous = self.pending.get(key, "")
+        self._require_instruction_read(key)
         if offset != len(previous):
             raise ProtocolError(f"Wrong offset; expected {len(previous)}")
         if sum(map(len, self.pending.values())) + len(content) > self.settings.staging_limit:
@@ -281,6 +412,7 @@ class ToolState:
             if key not in self.files:
                 self.files.append(key)
             self.effects += 1
+            self.reset_observations()
         else:
             self.pending[key] = combined
         return {
@@ -341,6 +473,42 @@ class ToolAgent:
         except (KeyError, TypeError):
             raise ProtocolError("Malformed tool call") from None
 
+    @staticmethod
+    def _compact_receipt(receipt):
+        result = receipt.get("result", {})
+        compact = {
+            "tool": receipt.get("tool"),
+            "target": clip(receipt.get("target", ""), 160),
+            "success": bool(result.get("success")),
+        }
+        for key in ("path", "next_offset", "eof", "published", "replacements", "redundant"):
+            if key in result:
+                compact[key] = result[key]
+        if result.get("error"):
+            compact["error"] = clip(result["error"], 160)
+        return compact
+
+    def _snapshot(self, state, feedback):
+        snapshot = {
+            "files": state.files[-6:],
+            "pending": {key: len(value) for key, value in list(state.pending.items())[-4:]},
+            "unresolved": [clip(value, 120) for value in sorted(state.failures)[-6:]],
+            "recent_actions": [self._compact_receipt(item) for item in state.receipts[-8:]],
+            "recent_results": state.receipts[-1:],
+            "feedback": feedback,
+        }
+        while (
+            len(json.dumps(snapshot, ensure_ascii=False)) > self.settings.snapshot_limit
+            and len(snapshot["recent_actions"]) > 1
+        ):
+            snapshot["recent_actions"].pop(0)
+        while (
+            len(json.dumps(snapshot, ensure_ascii=False)) > self.settings.snapshot_limit
+            and snapshot["recent_results"]
+        ):
+            snapshot["recent_results"].pop(0)
+        return snapshot
+
     def run(self, task, on_progress=None, on_message=None, attempt=1, timeout=None):
         timeout = self.settings.attempt_timeout if timeout is None else timeout
         deadline = time.monotonic() + max(0, timeout)
@@ -353,19 +521,12 @@ class ToolAgent:
             return state.result("failed", f"Tool environment unavailable: {clip(exc, 300)}")
         feedback = ""
         protocol_errors = 0
+        repeated_observations = 0
         for step_number in range(1, self.settings.step_limit + 1):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return state.result("failed", f"{self.settings.name} timed out after {timeout:g} seconds", True)
-            snapshot = {
-                "files": state.files[-6:],
-                "pending": {key: len(value) for key, value in list(state.pending.items())[-4:]},
-                "unresolved": [clip(value, 120) for value in sorted(state.failures)[-6:]],
-                "recent_results": state.receipts[-2:],
-                "feedback": feedback,
-            }
-            while len(json.dumps(snapshot, ensure_ascii=False)) > self.settings.snapshot_limit and snapshot["recent_results"]:
-                snapshot["recent_results"].pop(0)
+            snapshot = self._snapshot(state, feedback)
             messages = [
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": clip(task, self.settings.task_limit)},
@@ -429,17 +590,42 @@ class ToolAgent:
             if time.monotonic() >= deadline:
                 return state.result("failed", f"{self.settings.name} timed out after {timeout:g} seconds", True)
             arguments = data.get("arguments", {})
-            identity = str(data.get("tool")) + ":" + clip(
-                arguments.get("command", arguments.get("path", "")), 600
-            )
+            identity_target = arguments.get("command", arguments.get("path", ""))
+            if data.get("tool") == "read_file":
+                identity_target = f"{identity_target}@{arguments.get('offset')}"
+            identity = str(data.get("tool")) + ":" + clip(identity_target, 600)
             try:
+                observation = state.observation_key(data)
+                if observation in state.completed_observations:
+                    repeated_observations += 1
+                    tool_result = {
+                        "success": False,
+                        "redundant": True,
+                        "error": (
+                            f"Repeated successful observation {observation}. Use recent_actions and "
+                            "the prior next_offset/eof, choose a modifying tool, or finish."
+                        ),
+                    }
+                    state.receipts.append({
+                        "tool": data.get("tool"), "target": identity, "result": tool_result,
+                    })
+                    feedback = tool_result["error"]
+                    if repeated_observations >= 2:
+                        return state.result(
+                            "failed", f"Repeated tool loop detected at {observation}"
+                        )
+                    continue
                 if on_progress:
                     on_progress(f"{self.settings.name}: {data.get('tool')}")
                 tool_result = state.execute(data)
             except (ProtocolError, OSError, ValueError) as exc:
                 tool_result = {"success": False, "error": clip(exc, 200)}
+                if data.get("tool") in {"edit_file", "write_file"}:
+                    state.reset_observations()
             if tool_result["success"]:
                 state.failures.discard(identity)
+                state.record_observation(observation)
+                repeated_observations = 0
             else:
                 state.failures.add(identity)
             state.receipts.append({"tool": data.get("tool"), "target": identity, "result": tool_result})

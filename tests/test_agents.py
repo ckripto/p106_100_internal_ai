@@ -116,6 +116,73 @@ def test_atomic_chunks(tool_agent):
     assert state.result("success", "done")["status"] == "success"
 
 
+def test_exact_edit_is_atomic(tool_agent):
+    state = ToolState(tool_agent.settings)
+    target = tool_agent.settings.root / "theme.css"
+    target.write_text("green" + "x" * 7000 + "green")
+    state.execute(tool_call("read_file", path="theme.css", offset=0))
+
+    result = state.execute(tool_call(
+        "edit_file",
+        path="theme.css",
+        old="green",
+        new="blue",
+        expected_replacements=2,
+    ))
+
+    assert result["replacements"] == 2
+    assert target.read_text() == "blue" + "x" * 7000 + "blue"
+    with pytest.raises(ProtocolError, match="Expected 3 exact replacement"):
+        state.execute(tool_call(
+            "edit_file",
+            path="theme.css",
+            old="blue",
+            new="red",
+            expected_replacements=3,
+        ))
+    assert target.read_text() == "blue" + "x" * 7000 + "blue"
+
+
+def test_developer_requires_complete_nearest_instructions(tmp_path):
+    settings = replace(
+        DEVELOPER_SETTINGS,
+        root=tmp_path,
+        instruction_paths=(),
+        chunk_size=10,
+        enforce_instruction_reads=True,
+    )
+    state = ToolState(settings)
+    module = tmp_path / "module"
+    module.mkdir()
+    (module / "AGENTS.md").write_text("0123456789rules")
+    target = module / "code.py"
+    target.write_text("old")
+
+    with pytest.raises(ProtocolError, match="module/AGENTS.md"):
+        state.execute(tool_call(
+            "edit_file", path="module/code.py", old="old", new="new",
+            expected_replacements=1,
+        ))
+    state.execute(tool_call("read_file", path="module/AGENTS.md", offset=0))
+    with pytest.raises(ProtocolError, match="complete nearest instruction"):
+        state.execute(tool_call(
+            "edit_file", path="module/code.py", old="old", new="new",
+            expected_replacements=1,
+        ))
+    state.execute(tool_call("read_file", path="module/AGENTS.md", offset=10))
+    with pytest.raises(ProtocolError, match="Read module/code.py"):
+        state.execute(tool_call(
+            "edit_file", path="module/code.py", old="old", new="new",
+            expected_replacements=1,
+        ))
+    state.execute(tool_call("read_file", path="module/code.py", offset=0))
+    assert state.execute(tool_call(
+        "edit_file", path="module/code.py", old="old", new="new",
+        expected_replacements=1,
+    ))["success"]
+    assert target.read_text() == "new"
+
+
 def test_paths(tool_agent):
     (tool_agent.settings.root / "link").symlink_to("/tmp")
     state = ToolState(tool_agent.settings)
@@ -138,15 +205,16 @@ def test_ssh_state_routes_tools_to_remote(monkeypatch):
     )
     state = SSHToolState(settings)
     remote_python = Mock(
-        side_effect=["", "", "abc", '{"success":true,"files":[],"truncated":false}']
+        side_effect=["", "", "abc", "whole", '{"success":true,"files":[],"truncated":false}']
     )
     monkeypatch.setattr(state, "_remote_python", remote_python)
     state.prepare()
     state._write_file("a.txt", "abc")
     assert state._read_file("a.txt", 0) == "abc"
+    assert state._read_all("a.txt") == "whole"
     assert state._list_files()["files"] == []
     assert [call.args[0] for call in remote_python.call_args_list] == [
-        PREPARE_SCRIPT, FILE_SCRIPT, FILE_SCRIPT, LIST_SCRIPT,
+        PREPARE_SCRIPT, FILE_SCRIPT, FILE_SCRIPT, FILE_SCRIPT, LIST_SCRIPT,
     ]
     assert remote_python.call_args_list[1].kwargs["input_bytes"] == b"abc"
 
@@ -342,6 +410,33 @@ def test_tool_agent_logs_each_llm_step(monkeypatch, tool_agent):
     ]
     assert "Ты Executor" not in messages[0]["content"]
     assert json.loads(messages[1]["content"])["arguments"]["reason"] == "inspect workspace"
+
+
+def test_tool_agent_stops_repeated_observation_loop(monkeypatch, tool_agent):
+    agent = ToolAgent(replace(tool_agent.settings, snapshot_limit=1800))
+    (tool_agent.settings.root / "large.txt").write_text("x" * 3000)
+    calls = iter([
+        tool_call("read_file", path="large.txt", offset=0),
+        tool_call("read_file", path="large.txt", offset=1000),
+        tool_call("read_file", path="large.txt", offset=0),
+        tool_call("read_file", path="large.txt", offset=1000),
+    ])
+    snapshots = []
+
+    def ask(messages, timeout):
+        snapshots.append(json.loads(messages[-1]["content"]))
+        return next(calls)
+
+    monkeypatch.setattr(agent, "ask_llm", ask)
+    result = agent.run("inspect large file")
+
+    assert result["status"] == "failed"
+    assert result["timed_out"] is False
+    assert "Repeated tool loop" in result["summary"]
+    assert len(snapshots) == 4
+    assert [item["target"] for item in snapshots[2]["recent_actions"]] == [
+        "read_file:large.txt@0", "read_file:large.txt@1000",
+    ]
 
 
 def test_successful_external_request_prompts_immediate_finish(monkeypatch, tool_agent):

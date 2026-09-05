@@ -30,5 +30,6 @@ SETTINGS = AgentSettings(
         LOCAL_INSTRUCTIONS,
         Path(__file__).with_name("AGENTS.md"),
     ) if path.exists()),
+    enforce_instruction_reads=True,
     excluded_names=frozenset({".git", ".pytest_cache", "__pycache__", "data", "venv"}),
 )

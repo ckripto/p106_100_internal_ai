@@ -163,6 +163,19 @@ class SSHToolState(ToolState):
             self.settings.chunk_size + 1,
         )
 
+    def _read_all(self, relative_path):
+        content = self._remote_python(
+            FILE_SCRIPT,
+            "read",
+            self.settings.root,
+            relative_path,
+            0,
+            self.settings.staging_limit + 1,
+        )
+        if len(content) > self.settings.staging_limit:
+            raise ProtocolError("File exceeds edit limit")
+        return content
+
     def _list_files(self):
         output = self._remote_python(
             LIST_SCRIPT,
