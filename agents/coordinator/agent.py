@@ -115,13 +115,25 @@ class Coordinator:
                 log_llm_response(decision)
                 feedback = ""
 
+                if decision.get("type") == "answer":
+                    if attempts:
+                        raise ProtocolError("Use final after delegating; answer is only for direct replies")
+                    result = {
+                        "type": "final",
+                        "status": "success",
+                        "summary": string(decision, "summary"),
+                    }
+                    break
+
                 if decision.get("type") == "final":
                     status = decision.get("status")
                     if status not in {"success", "failed"}:
                         raise ProtocolError("Invalid final status")
                     summary = string(decision, "summary")
                     if status == "success" and (latest is None or latest["status"] != "success"):
-                        raise ProtocolError("Success requires a successful agent result for this task")
+                        raise ProtocolError(
+                            "Success requires an agent result; use answer for an informational reply"
+                        )
                     if status == "failed" and recovery_target and len(attempts) < self.settings.max_delegations:
                         raise ProtocolError("After a timeout, delegate a smaller recovery task before giving up")
                     result = {"type": "final", "status": status, "summary": summary}
@@ -129,7 +141,7 @@ class Coordinator:
 
                 agent_name = decision.get("agent")
                 if decision.get("type") != "delegate" or agent_name not in self.runners:
-                    raise ProtocolError("Expected delegate to executor/developer or final")
+                    raise ProtocolError("Expected answer, delegate to executor/developer, or final")
                 delegated = string(decision, "task", self.settings.task_limit)
                 if len(attempts) >= self.settings.max_delegations:
                     result = {

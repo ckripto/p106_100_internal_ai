@@ -147,6 +147,39 @@ def test_false_success(monkeypatch, tool_agent):
     assert coordinator.run("run test")["status"] == "failed"
 
 
+def test_coordinator_answers_informational_question(monkeypatch):
+    runner = Mock()
+    coordinator = Coordinator(COORDINATOR_SETTINGS, {"executor": runner})
+    monkeypatch.setattr(coordinator, "ask_llm", lambda messages: {
+        "type": "answer",
+        "summary": "Столица Франции — Париж.",
+        "reason": "Инструменты не требуются.",
+    })
+    result = coordinator.run("Какая столица у Франции?")
+    assert result == {
+        "type": "final",
+        "status": "success",
+        "summary": "Столица Франции — Париж.",
+    }
+    runner.assert_not_called()
+
+
+def test_coordinator_rejects_answer_after_delegation(monkeypatch):
+    decisions = iter([
+        {"type": "delegate", "agent": "executor", "task": "inspect"},
+        {"type": "answer", "summary": "done", "reason": "no tools"},
+        {"type": "final", "status": "success", "summary": "done"},
+    ])
+    runner = Mock(return_value={
+        "status": "success", "summary": "inspected", "files": [], "commands": []
+    })
+    coordinator = Coordinator(COORDINATOR_SETTINGS, {"executor": runner})
+    monkeypatch.setattr(coordinator, "ask_llm", lambda messages: next(decisions))
+    assert coordinator.run("inspect") == {
+        "type": "final", "status": "success", "summary": "done"
+    }
+
+
 def test_coordinator_bounds_protocol_corrections(monkeypatch):
     coordinator = Coordinator(COORDINATOR_SETTINGS, {"executor": Mock()})
     ask = Mock(return_value={"type": "unexpected"})
@@ -154,7 +187,7 @@ def test_coordinator_bounds_protocol_corrections(monkeypatch):
     result = coordinator.run("run test")
     assert result["status"] == "failed"
     assert ask.call_count == coordinator.settings.max_protocol_errors
-    assert "Expected delegate" in result["summary"]
+    assert "Expected answer" in result["summary"]
 
 
 def test_failed_command_cannot_be_hidden(monkeypatch, tool_agent):
