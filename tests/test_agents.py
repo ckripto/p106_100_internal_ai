@@ -539,6 +539,6 @@ def test_coordinator_stops_after_repeated_timeouts(monkeypatch):
 
 def test_developer_has_project_root_and_instruction_context():
     assert DEVELOPER_SETTINGS.root == DEVELOPER_SETTINGS.root.resolve()
-    assert DEVELOPER_SETTINGS.root.name == "agents"
+    assert DEVELOPER_SETTINGS.root == Path(__file__).resolve().parents[1]
     assert "Доступ и эксплуатационные права" in DEVELOPER_AGENT.system_prompt
     assert "Developer дорабатывает проект" in DEVELOPER_AGENT.system_prompt
