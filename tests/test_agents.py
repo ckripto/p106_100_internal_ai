@@ -65,9 +65,27 @@ def test_executor_marks_llm_timeout(monkeypatch, tool_agent):
         "ask_llm",
         Mock(side_effect=TransportTimeout("late")),
     )
-    result = tool_agent.run("x")
+    messages = []
+    result = tool_agent.run("x", on_message=messages.append, attempt=2)
     assert result["status"] == "failed"
     assert result["timed_out"] is True
+    assert [(item["sender"], item["recipient"]) for item in messages] == [
+        ("executor", "llm"), ("llm", "executor")
+    ]
+    assert messages[0]["step"] == messages[1]["step"] == 1
+    assert json.loads(messages[1]["content"])["status"] == "timeout"
+    assert messages[1]["response_seconds"] >= 0
+
+
+def test_coordinator_logs_llm_timeout(monkeypatch):
+    coordinator = Coordinator(COORDINATOR_SETTINGS, {"executor": Mock()})
+    monkeypatch.setattr(coordinator, "ask_llm", Mock(side_effect=TransportTimeout("late")))
+    messages = []
+    assert coordinator.run("x", on_message=messages.append)["status"] == "failed"
+    assert [(item["sender"], item["recipient"]) for item in messages] == [
+        ("coordinator", "llm"), ("llm", "coordinator")
+    ]
+    assert json.loads(messages[1]["content"])["status"] == "timeout"
 
 
 def test_atomic_chunks(tool_agent):
@@ -172,6 +190,22 @@ def test_recovery_and_no_payload_in_context(monkeypatch, tool_agent):
     assert "print(42)" not in seen[-1]
 
 
+def test_tool_agent_logs_each_llm_step(monkeypatch, tool_agent):
+    calls = iter([
+        tool_call("list_files", reason="inspect workspace"),
+        tool_call("finish", status="success", summary="listed", reason="inspection complete"),
+    ])
+    monkeypatch.setattr(tool_agent, "ask_llm", lambda messages, timeout: next(calls))
+    messages = []
+    assert tool_agent.run("list files", on_message=messages.append, attempt=3)["status"] == "success"
+    assert [(item["sender"], item["recipient"], item["step"]) for item in messages] == [
+        ("executor", "llm", 1), ("llm", "executor", 1),
+        ("executor", "llm", 2), ("llm", "executor", 2),
+    ]
+    assert "Ты Executor" not in messages[0]["content"]
+    assert json.loads(messages[1]["content"])["arguments"]["reason"] == "inspect workspace"
+
+
 def test_session_and_boundary(monkeypatch):
     decisions = iter([
         {"type": "delegate", "agent": "executor", "task": "write a.py"},
@@ -202,11 +236,17 @@ def test_session_and_boundary(monkeypatch):
     assert coordinator.run("create", history, on_message=agent_messages.append)["status"] == "success"
     assert "SECRET" not in seen[-1]
     assert [(message["sender"], message["recipient"]) for message in agent_messages] == [
-        ("coordinator", "executor"), ("executor", "coordinator")
+        ("coordinator", "llm"), ("llm", "coordinator"),
+        ("coordinator", "executor"), ("executor", "coordinator"),
+        ("coordinator", "llm"), ("llm", "coordinator"),
     ]
-    assert agent_messages[0]["content"] == "write a.py"
-    assert agent_messages[1]["response_seconds"] >= 0
-    assert "SECRET" not in agent_messages[1]["content"]
+    delegation = agent_messages[2]
+    agent_response = agent_messages[3]
+    assert delegation["content"] == "write a.py"
+    assert agent_response["response_seconds"] >= 0
+    assert "SECRET" not in agent_response["content"]
+    assert agent_messages[0]["step"] == 1
+    assert json.loads(agent_messages[1]["content"])["type"] == "delegate"
     assert len(history) == 2
 
     monkeypatch.setattr(coordinator, "ask_llm", lambda messages: (

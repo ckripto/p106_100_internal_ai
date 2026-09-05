@@ -5,7 +5,7 @@ import time
 
 from agents.developer import run_agent as run_developer
 from agents.executor import run_agent as run_executor
-from agents.shared import ProtocolError, TransportError, clip
+from agents.shared import ProtocolError, TransportError, TransportTimeout, clip, emit_message
 from agents.shared.protocol import object_json, request, string
 
 from .settings import SETTINGS
@@ -60,7 +60,7 @@ class Coordinator:
         protocol_errors = 0
         max_decisions = self.settings.max_delegations * 2 + 4
 
-        for _ in range(max_decisions):
+        for decision_number in range(1, max_decisions + 1):
             try:
                 if on_progress:
                     action = "перепланирует задачу после тайм-аута" if recovery_target else "обдумывает следующий шаг"
@@ -78,7 +78,41 @@ class Coordinator:
                         "role": "user",
                         "content": json.dumps(coordination_state, ensure_ascii=False),
                     })
-                decision = self.ask_llm(messages)
+                emit_message(
+                    on_message,
+                    attempt=decision_number,
+                    step=decision_number,
+                    sender="coordinator",
+                    recipient="llm",
+                    kind="request",
+                    content=messages[1:],
+                )
+                response_started = time.monotonic()
+
+                def log_llm_response(content):
+                    emit_message(
+                        on_message,
+                        attempt=decision_number,
+                        step=decision_number,
+                        sender="llm",
+                        recipient="coordinator",
+                        kind="response",
+                        content=content,
+                        response_seconds=round(time.monotonic() - response_started, 3),
+                    )
+
+                try:
+                    decision = self.ask_llm(messages)
+                except ProtocolError as exc:
+                    log_llm_response({"status": "protocol_error", "error": str(exc)})
+                    raise
+                except TransportTimeout as exc:
+                    log_llm_response({"status": "timeout", "error": str(exc)})
+                    raise
+                except TransportError as exc:
+                    log_llm_response({"status": "transport_error", "error": str(exc)})
+                    raise
+                log_llm_response(decision)
                 feedback = ""
 
                 if decision.get("type") == "final":
@@ -114,29 +148,31 @@ class Coordinator:
                     on_progress(
                         f"{agent_name}: попытка {attempt_number} из {self.settings.max_delegations}"
                     )
-                if on_message:
-                    on_message({
-                        "attempt": attempt_number,
-                        "sender": "coordinator",
-                        "recipient": agent_name,
-                        "kind": "request",
-                        "content": delegated,
-                        "created": time.time(),
-                        "response_seconds": None,
-                    })
+                emit_message(
+                    on_message,
+                    attempt=attempt_number,
+                    sender="coordinator",
+                    recipient=agent_name,
+                    kind="request",
+                    content=delegated,
+                )
                 response_started = time.monotonic()
-                latest = self.runners[agent_name](delegated, on_progress=on_progress)
+                latest = self.runners[agent_name](
+                    delegated,
+                    on_progress=on_progress,
+                    on_message=on_message,
+                    attempt=attempt_number,
+                )
                 compact = self._compact_result(agent_name, delegated, latest)
-                if on_message:
-                    on_message({
-                        "attempt": attempt_number,
-                        "sender": agent_name,
-                        "recipient": "coordinator",
-                        "kind": "response",
-                        "content": json.dumps(compact, ensure_ascii=False),
-                        "created": time.time(),
-                        "response_seconds": round(time.monotonic() - response_started, 3),
-                    })
+                emit_message(
+                    on_message,
+                    attempt=attempt_number,
+                    sender=agent_name,
+                    recipient="coordinator",
+                    kind="response",
+                    content=compact,
+                    response_seconds=round(time.monotonic() - response_started, 3),
+                )
                 attempts.append(compact)
                 if compact["timed_out"]:
                     recovery_target = (agent_name, delegated.strip().casefold())

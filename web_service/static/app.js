@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const state = {sid:null, tasks:new Map(), hasMore:false, busy:false, refreshing:false, listKey:'', detailKey:''};
 const labels = {queued:'В очереди',running:'Выполняется',success:'Готово',failed:'Не выполнено',interrupted:'Прервано'};
-const actorLabels = {coordinator:'Координатор',executor:'Executor',developer:'Developer'};
+const actorLabels = {coordinator:'Координатор',executor:'Executor',developer:'Developer',llm:'LLM'};
 function saved(key, value) { try { if(value === undefined) return localStorage.getItem(key); if(value === null) localStorage.removeItem(key); else localStorage.setItem(key,value); } catch(_) {} }
 function notice(text='') { $('notice').textContent=text; $('notice').hidden=!text; }
 async function api(path, method='GET', body) {
@@ -26,20 +26,24 @@ function agentMessages(task, opened) {
   const messages=task.agent_messages||[]; if(!messages.length)return null;
   const details=element('details','agent-messages'); details.dataset.id='messages-'+task.id;
   details.open=opened.has(details.dataset.id);
-  details.append(element('summary','',`Сообщения агентов (${messages.length})`));
+  details.append(element('summary','',`Журнал агентов и LLM (${messages.length})`));
   const list=element('ol','message-list');
   for(const message of messages) {
-    const item=element('li','agent-message '+message.kind), meta=element('div','message-meta');
+    const llmExchange=message.sender==='llm'||message.recipient==='llm';
+    const exchangeLabel=message.recipient==='llm'?'Запрос к LLM':message.sender==='llm'?'Ответ LLM':message.kind==='request'?'Делегация':'Ответ агента';
+    const ordinal=message.step?'Шаг '+message.step:'Попытка '+message.attempt;
+    const item=element('li','agent-message '+message.kind+(llmExchange?' llm':'')), meta=element('div','message-meta');
     meta.append(
       element('strong','',actorLabels[message.sender]||message.sender),
       element('span','message-arrow','→'),
       element('span','',actorLabels[message.recipient]||message.recipient),
-      element('span','message-attempt','Попытка '+message.attempt),
+      element('span','message-kind',exchangeLabel),
+      element('span','message-attempt',ordinal),
       element('time','message-time',messageDate(message.created))
     );
-    if(message.response_seconds!==null)meta.append(element('span','response-time','Ответ за '+duration(message.response_seconds)));
+    if(message.response_seconds!==null&&message.response_seconds!==undefined)meta.append(element('span','response-time','Ответ за '+duration(message.response_seconds)));
     let content=message.content;
-    if(message.kind==='response')try{content=JSON.stringify(JSON.parse(content),null,2);}catch(_){}
+    try{content=JSON.stringify(JSON.parse(content),null,2);}catch(_){}
     item.append(meta,element('pre','message-content',content)); list.append(item);
   }
   details.append(list); return details;

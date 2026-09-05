@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .events import emit_message
 from .protocol import (
     ProtocolError,
     TransportError,
@@ -24,6 +25,7 @@ from .protocol import (
 
 @dataclass(frozen=True)
 class AgentSettings:
+    actor: str
     name: str
     root: Path
     prompt_path: Path
@@ -58,6 +60,7 @@ def _tool(name, description, properties, required):
 
 def build_tools(chunk_size):
     text = {"type": "string"}
+    reason = {"type": "string", "maxLength": 200}
     return [
         _tool(
             "write_file",
@@ -68,23 +71,25 @@ def build_tools(chunk_size):
                 "content": {"type": "string", "maxLength": chunk_size},
                 "offset": {"type": "integer", "minimum": 0},
                 "final": {"type": "boolean"},
+                "reason": reason,
             },
             ["path", "content", "offset", "final"],
         ),
-        _tool("run_command", "Run a short shell command from the configured root.", {"command": text}, ["command"]),
+        _tool("run_command", "Run a short shell command from the configured root.", {"command": text, "reason": reason}, ["command"]),
         _tool(
             "read_file",
             f"Read up to {chunk_size} characters of a published or staged file from offset.",
-            {"path": text, "offset": {"type": "integer", "minimum": 0}},
+            {"path": text, "offset": {"type": "integer", "minimum": 0}, "reason": reason},
             ["path", "offset"],
         ),
-        _tool("list_files", "List files below the configured root (bounded).", {}, []),
+        _tool("list_files", "List files below the configured root (bounded).", {"reason": reason}, []),
         _tool(
             "finish",
             "Finish only after inspecting tool results. Pending writes or unresolved failures reject success.",
             {
                 "status": {"type": "string", "enum": ["success", "failed"]},
                 "summary": text,
+                "reason": reason,
             },
             ["status", "summary"],
         ),
@@ -200,7 +205,9 @@ class ToolState:
         )
         if not spec or name == "finish" or not isinstance(arguments, dict):
             raise ProtocolError("Unknown tool or invalid arguments")
-        if set(arguments) != set(spec["parameters"]["required"]):
+        required = set(spec["parameters"]["required"])
+        allowed = set(spec["parameters"]["properties"])
+        if not required.issubset(arguments) or not set(arguments).issubset(allowed):
             raise ProtocolError("Unexpected or missing tool arguments")
         if name == "run_command":
             command = string(arguments, "command", 600)
@@ -311,7 +318,7 @@ class ToolAgent:
         except (KeyError, TypeError):
             raise ProtocolError("Malformed tool call") from None
 
-    def run(self, task, on_progress=None, timeout=None):
+    def run(self, task, on_progress=None, on_message=None, attempt=1, timeout=None):
         self.settings.root.mkdir(parents=True, exist_ok=True)
         timeout = self.settings.attempt_timeout if timeout is None else timeout
         deadline = time.monotonic() + max(0, timeout)
@@ -320,7 +327,7 @@ class ToolAgent:
         protocol_errors = 0
         if not isinstance(task, str) or not task.strip() or len(task) > self.settings.task_limit:
             return state.result("failed", f"Task must contain 1–{self.settings.task_limit} characters")
-        for _ in range(self.settings.step_limit):
+        for step_number in range(1, self.settings.step_limit + 1):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return state.result("failed", f"{self.settings.name} timed out after {timeout:g} seconds", True)
@@ -338,20 +345,54 @@ class ToolAgent:
                 {"role": "user", "content": clip(task, self.settings.task_limit)},
                 {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False)},
             ]
+            if on_progress:
+                on_progress(f"{self.settings.name} обдумывает следующий шаг")
+            emit_message(
+                on_message,
+                attempt=attempt,
+                step=step_number,
+                sender=self.settings.actor,
+                recipient="llm",
+                kind="request",
+                content=messages[1:],
+            )
+            response_started = time.monotonic()
+
+            def log_llm_response(content):
+                emit_message(
+                    on_message,
+                    attempt=attempt,
+                    step=step_number,
+                    sender="llm",
+                    recipient=self.settings.actor,
+                    kind="response",
+                    content=content,
+                    response_seconds=round(time.monotonic() - response_started, 3),
+                )
+
             try:
-                if on_progress:
-                    on_progress(f"{self.settings.name} обдумывает следующий шаг")
                 data = self.ask_llm(messages, min(self.settings.transport.response_timeout, remaining))
+            except TransportTimeout as exc:
+                log_llm_response({"status": "timeout", "error": str(exc)})
+                return state.result("failed", f"{self.settings.name} did not receive an LLM response in time", True)
+            except TransportError as exc:
+                log_llm_response({"status": "transport_error", "error": str(exc)})
+                return state.result("failed", str(exc))
+            except ProtocolError as exc:
+                log_llm_response({"status": "protocol_error", "error": str(exc)})
+                feedback = str(exc)
+                protocol_errors += 1
+                if protocol_errors >= 3:
+                    return state.result("failed", feedback)
+                continue
+            log_llm_response(data)
+            try:
                 if data.get("tool") == "finish":
                     arguments = data["arguments"]
                     status = arguments.get("status")
                     if status not in {"success", "failed"}:
                         raise ProtocolError("Invalid status")
                     return state.result(status, string(arguments, "summary"))
-            except TransportTimeout:
-                return state.result("failed", f"{self.settings.name} did not receive an LLM response in time", True)
-            except TransportError as exc:
-                return state.result("failed", str(exc))
             except ProtocolError as exc:
                 feedback = str(exc)
                 protocol_errors += 1

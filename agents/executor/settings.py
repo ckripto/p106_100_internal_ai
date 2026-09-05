@@ -8,6 +8,7 @@ from agents.shared import AgentSettings, TransportSettings
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 SETTINGS = AgentSettings(
+    actor="executor",
     name="Исполнитель",
     root=Path(os.environ.get("EXECUTOR_WORKSPACE", PROJECT_ROOT / "workspace")),
     prompt_path=Path(__file__).with_name("prompt.md"),

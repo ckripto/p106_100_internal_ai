@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 
 import pytest
@@ -79,7 +80,35 @@ def test_agent_messages_require_running_task(app):
         store.append_agent_message(task['id'], message)
     store.claim()
     store.append_agent_message(task['id'], message)
-    assert store.session_detail(sid)['tasks'][0]['agent_messages'][0]['content'] == 'inspect'
+    store.append_agent_message(task['id'], {
+        'attempt': 1, 'step': 1, 'sender': 'developer', 'recipient': 'llm',
+        'kind': 'request', 'content': '[{"role":"user","content":"inspect"}]',
+        'created': 10.5, 'response_seconds': None,
+    })
+    messages = store.session_detail(sid)['tasks'][0]['agent_messages']
+    assert messages[0]['content'] == 'inspect'
+    assert messages[1]['recipient'] == 'llm' and messages[1]['step'] == 1
+
+
+def test_agent_message_schema_migrates_existing_database(tmp_path):
+    path = tmp_path / 'legacy.sqlite3'
+    with sqlite3.connect(path) as database:
+        database.execute('''
+            CREATE TABLE agent_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                attempt INTEGER NOT NULL,
+                sender TEXT NOT NULL,
+                recipient TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created REAL NOT NULL,
+                response_seconds REAL)
+        ''')
+    Store(path)
+    with sqlite3.connect(path) as database:
+        columns = {row[1] for row in database.execute('PRAGMA table_info(agent_messages)')}
+    assert 'step' in columns
 
 
 def test_recovery_does_not_reexecute_running(app):

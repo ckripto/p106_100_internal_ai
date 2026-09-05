@@ -38,6 +38,7 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                     attempt INTEGER NOT NULL,
+                    step INTEGER,
                     sender TEXT NOT NULL,
                     recipient TEXT NOT NULL,
                     kind TEXT NOT NULL,
@@ -47,6 +48,11 @@ class Store:
                 CREATE INDEX IF NOT EXISTS agent_messages_task
                     ON agent_messages(task_id, id);
             """)
+            columns = {
+                row["name"] for row in database.execute("PRAGMA table_info(agent_messages)")
+            }
+            if "step" not in columns:
+                database.execute("ALTER TABLE agent_messages ADD COLUMN step INTEGER")
 
     @contextmanager
     def connect(self):
@@ -212,10 +218,11 @@ class Store:
             )
 
     def append_agent_message(self, task_id, message):
-        actors = {"coordinator", "executor", "developer"}
+        actors = {"coordinator", "executor", "developer", "llm"}
         if not isinstance(message, dict):
             raise ValueError("Agent message must be an object")
         attempt = message.get("attempt")
+        step = message.get("step")
         sender = message.get("sender")
         recipient = message.get("recipient")
         kind = message.get("kind")
@@ -224,11 +231,13 @@ class Store:
         response_seconds = message.get("response_seconds")
         if type(attempt) is not int or attempt < 1:
             raise ValueError("Invalid agent message attempt")
+        if step is not None and (type(step) is not int or step < 1):
+            raise ValueError("Invalid agent message step")
         if sender not in actors or recipient not in actors or sender == recipient:
             raise ValueError("Invalid agent message route")
         if kind not in {"request", "response"}:
             raise ValueError("Invalid agent message kind")
-        if not isinstance(content, str) or not content or len(content) > 5000:
+        if not isinstance(content, str) or not content or len(content) > 65_536:
             raise ValueError("Invalid agent message content")
         if not isinstance(created, (int, float)):
             raise ValueError("Invalid agent message timestamp")
@@ -238,11 +247,11 @@ class Store:
             raise ValueError("Invalid agent response duration")
         with self.connect() as database:
             cursor = database.execute(
-                "INSERT INTO agent_messages(task_id,attempt,sender,recipient,kind,content,created,response_seconds) "
-                "SELECT ?,?,?,?,?,?,?,? WHERE EXISTS "
+                "INSERT INTO agent_messages(task_id,attempt,step,sender,recipient,kind,content,created,response_seconds) "
+                "SELECT ?,?,?,?,?,?,?,?,? WHERE EXISTS "
                 "(SELECT 1 FROM tasks WHERE id=? AND status='running')",
                 (
-                    task_id, attempt, sender, recipient, kind, content,
+                    task_id, attempt, step, sender, recipient, kind, content,
                     created, response_seconds, task_id,
                 ),
             )

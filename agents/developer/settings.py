@@ -9,6 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_INSTRUCTIONS = PROJECT_ROOT / "AGENTS.local.md"
 
 SETTINGS = AgentSettings(
+    actor="developer",
     name="Developer",
     root=PROJECT_ROOT,
     prompt_path=Path(__file__).with_name("prompt.md"),

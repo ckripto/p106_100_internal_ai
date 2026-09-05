@@ -16,6 +16,12 @@ def main():
         app = create_app(Path(directory) / 'db.sqlite3')
         def runner(prompt, history, on_progress, on_message):
             on_progress('Проверка фонового выполнения')
+            on_message({'attempt':1,'step':1,'sender':'coordinator','recipient':'llm',
+                        'kind':'request','content':'[{"role":"user","content":"plan"}]',
+                        'created':time.time(),'response_seconds':None})
+            on_message({'attempt':1,'step':1,'sender':'llm','recipient':'coordinator',
+                        'kind':'response','content':'{"type":"delegate","reason":"start"}',
+                        'created':time.time(),'response_seconds':0.25})
             on_message({'attempt':1,'sender':'coordinator','recipient':'executor',
                         'kind':'request','content':prompt,'created':time.time(),
                         'response_seconds':None})
@@ -55,6 +61,8 @@ def main():
                 page.locator('.agent-messages summary').click()
                 expect(page.locator('.agent-messages')).to_contain_text('Ответ за 2.00 с')
                 expect(page.locator('.agent-messages')).to_contain_text('Координатор')
+                expect(page.locator('.agent-messages')).to_contain_text('Ответ LLM')
+                expect(page.locator('.agent-messages')).to_contain_text('Шаг 1')
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 page.screenshot(path='/tmp/agents-mobile.png', full_page=True)
                 page.locator('#prompt').fill('Уточнение в той же сессии')
