@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f5ef"><title>Агенты · Координатор</title>
+  <link rel="icon" href="data:,"><link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside id="sidebar" aria-label="Сессии">
+    <div class="brand"><span class="mark">а</span><div>Агенты<small>Локальный помощник</small></div><button id="close-menu" class="icon mobile" aria-label="Закрыть список">×</button></div>
+    <button id="new-session" class="primary new"><span>＋</span> Новая сессия</button>
+    <div class="section-label">ВАШИ СЕССИИ</div>
+    <nav id="sessions" aria-label="Список сессий"></nav>
+    <p class="sidebar-note">Сессии хранятся, пока вы<br>не удалите их сами.</p>
+  </aside>
+  <button id="overlay" aria-label="Закрыть меню" hidden></button>
+  <main>
+    <header>
+      <button id="open-menu" class="icon mobile" aria-label="Открыть сессии">☰</button>
+      <div class="heading"><span class="eyebrow">КООРДИНАТОР</span><h1 id="title">Новая задача начинается здесь</h1></div>
+      <button id="delete-session" class="quiet" disabled aria-label="Удалить сессию">Удалить</button>
+    </header>
+    <div id="notice" role="status" hidden></div>
+    <section id="conversation" aria-label="Задачи и результаты">
+      <div id="welcome" class="welcome"><div class="welcome-symbol">✳</div><h2>Что нужно сделать?</h2><p>Создайте сессию и опишите задачу.<br>Координатор выберет подходящего агента<br>и сохранит результат здесь.</p><div class="hint">Можно закрыть браузер — работа продолжится.</div></div>
+      <button id="load-older" class="quiet older" hidden>Показать предыдущие задачи</button>
+      <div id="messages"></div>
+    </section>
+    <footer>
+      <form id="composer">
+        <label for="prompt" class="sr-only">Задача координатору</label>
+        <textarea id="prompt" rows="2" maxlength="1800" placeholder="Опишите задачу или уточните предыдущую…" disabled></textarea>
+        <div class="compose-bottom"><span id="count">0 / 1800</span><button id="send" class="primary" type="submit" disabled>Отправить <span aria-hidden="true">↑</span></button></div>
+      </form>
+      <p class="footer-note">Задачи выполняются по очереди. Результат сохранится в сессии.</p>
+    </footer>
+  </main>
+</div>
+</body>
+</html>

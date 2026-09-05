@@ -1,0 +1,40 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+AGENTS.local.md
+*.local.md
+!*.local.md.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# Runtime state and user artifacts
+data/
+workspace/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.log
+
+# Python environments and caches
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Deployment-local files and generated reports
+ops/*.service
+ops/*.env
+ops/*-result.json
+ops/*-report.txt
+ops/web-live-smoke.json

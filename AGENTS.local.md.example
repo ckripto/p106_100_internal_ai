@@ -1,0 +1,10 @@
+# Local infrastructure
+
+Copy this file to `AGENTS.local.md` and fill deployment-specific facts. The local
+file is ignored by Git. Do not place addresses, credentials or internal topology in
+the tracked root `AGENTS.md`.
+
+- Proxmox SSH target: use `$PROXMOX_SSH_TARGET` from `.env`.
+- Inference SSH target: use `$INFERENCE_SSH_TARGET` from `.env`.
+- Web-service SSH target: use `$WEB_SSH_TARGET` from `.env`.
+- Record only operational facts required to maintain this installation.

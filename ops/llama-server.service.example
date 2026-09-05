@@ -1,0 +1,22 @@
+[Unit]
+Description=Shared llama-server inference backend
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/llama.cpp
+Environment=HOME=/root
+EnvironmentFile=/root/llama-server.env
+ExecStart=/root/llama.cpp/build/bin/llama-server -hf ${LLAMA_MODEL} --n-gpu-layers 999 --split-mode layer --tensor-split ${LLAMA_TENSOR_SPLIT} --ctx-size ${LLAMA_CONTEXT_SIZE} --threads ${LLAMA_THREADS} --parallel 1 --batch-size 32 --ubatch-size 16 --host ${LLAMA_HOST} --port ${LLAMA_PORT}
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=90s
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

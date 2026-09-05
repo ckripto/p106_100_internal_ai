@@ -1,0 +1,24 @@
+[Unit]
+Description=AI Agents single-user web interface
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/agents
+Environment=PATH=/opt/agents/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/agents/.env
+ExecStart=/opt/agents/venv/bin/python -m web_service
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=40s
+KillMode=control-group
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
