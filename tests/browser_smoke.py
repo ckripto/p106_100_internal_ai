@@ -33,9 +33,9 @@ def main():
         worker = Worker(app.extensions['store'], runner)
         app.extensions['worker'] = worker
         threading.Thread(target=worker.run, daemon=True).start()
-        server = create_server(app, host='localhost', port=0)
+        server = create_server(app, host='127.0.0.1', port=0)
         threading.Thread(target=server.run, daemon=True).start()
-        url = f'http://localhost:{server.effective_port}'
+        url = f'http://127.0.0.1:{server.effective_port}'
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(args=['--no-sandbox', '--disable-dev-shm-usage'])
