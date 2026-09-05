@@ -1,6 +1,7 @@
 """Planning, routing and bounded recovery across local agents."""
 
 import json
+import re
 import time
 
 from agents.developer import run_agent as run_developer
@@ -12,6 +13,18 @@ from .settings import SETTINGS
 
 
 class Coordinator:
+    _freshness = re.compile(
+        r"(?:\bсейчас\b|\bсегодня\b|\bактуальн\w*|\bтекущ\w*|"
+        r"\bна данный момент\b|\bcurrent\b|\blatest\b|\btoday\b|\blive\b)",
+        re.IGNORECASE,
+    )
+    _live_subject = re.compile(
+        r"(?:\bкурс\w*|\bцен\w*|\bстоимост\w*|\bкотиров\w*|\bбиткоин\w*|"
+        r"\bбиткойн\w*|\bbtc\b|\bпогод\w*|\bтемператур\w*|\bсч[её]т\b|"
+        r"\brate\b|\bprice\b|\bquote\b|\bbitcoin\b|\bweather\b|\bscore\b)",
+        re.IGNORECASE,
+    )
+
     def __init__(self, settings=SETTINGS, runners=None):
         self.settings = settings
         self.prompt = settings.prompt_path.read_text(encoding="utf-8").strip()
@@ -41,6 +54,70 @@ class Coordinator:
             ],
         }
 
+    @classmethod
+    def _is_fresh_lookup(cls, task):
+        return bool(cls._freshness.search(task) and cls._live_subject.search(task))
+
+    def _fresh_lookup_task(self, task):
+        instruction = (
+            "Получи одно актуальное значение через доступный публичный API или команду "
+            "и верни проверенное значение в summary. Не создавай файл, если пользователь "
+            "этого не просил. Не повторяй успешный запрос только ради обновления значения. "
+            "Запрос пользователя: "
+        )
+        return instruction + task[: self.settings.task_limit - len(instruction)]
+
+    def _request_decision(self, base, attempts, feedback, decision_number, on_message):
+        messages = list(base)
+        if attempts or feedback:
+            coordination_state = {
+                "type": "coordination_state",
+                "attempts": attempts,
+                "instruction": "Выбери следующий небольшой шаг или дай итог.",
+            }
+            if feedback:
+                coordination_state["correction"] = feedback
+            messages.append({
+                "role": "user",
+                "content": json.dumps(coordination_state, ensure_ascii=False),
+            })
+        emit_message(
+            on_message,
+            attempt=decision_number,
+            step=decision_number,
+            sender="coordinator",
+            recipient="llm",
+            kind="request",
+            content=messages[1:],
+        )
+        response_started = time.monotonic()
+
+        def log_response(content):
+            emit_message(
+                on_message,
+                attempt=decision_number,
+                step=decision_number,
+                sender="llm",
+                recipient="coordinator",
+                kind="response",
+                content=content,
+                response_seconds=round(time.monotonic() - response_started, 3),
+            )
+
+        try:
+            decision = self.ask_llm(messages)
+        except ProtocolError as exc:
+            log_response({"status": "protocol_error", "error": str(exc)})
+            raise
+        except TransportTimeout as exc:
+            log_response({"status": "timeout", "error": str(exc)})
+            raise
+        except TransportError as exc:
+            log_response({"status": "transport_error", "error": str(exc)})
+            raise
+        log_response(decision)
+        return decision
+
     def run(self, task, history=None, on_progress=None, on_message=None):
         history = history if history is not None else []
         if not isinstance(task, str) or not task.strip() or len(task) > self.settings.task_limit:
@@ -59,60 +136,23 @@ class Coordinator:
         feedback = ""
         protocol_errors = 0
         max_decisions = self.settings.max_delegations * 2 + 4
+        fresh_lookup = self._is_fresh_lookup(task)
 
         for decision_number in range(1, max_decisions + 1):
             try:
                 if on_progress:
                     action = "перепланирует задачу после тайм-аута" if recovery_target else "обдумывает следующий шаг"
                     on_progress("Координатор " + action)
-                messages = list(base)
-                if attempts or feedback:
-                    coordination_state = {
-                        "type": "coordination_state",
-                        "attempts": attempts,
-                        "instruction": "Выбери следующий небольшой шаг или дай итог.",
+                if fresh_lookup and decision_number == 1:
+                    decision = {
+                        "type": "delegate",
+                        "agent": "executor",
+                        "task": self._fresh_lookup_task(task),
                     }
-                    if feedback:
-                        coordination_state["correction"] = feedback
-                    messages.append({
-                        "role": "user",
-                        "content": json.dumps(coordination_state, ensure_ascii=False),
-                    })
-                emit_message(
-                    on_message,
-                    attempt=decision_number,
-                    step=decision_number,
-                    sender="coordinator",
-                    recipient="llm",
-                    kind="request",
-                    content=messages[1:],
-                )
-                response_started = time.monotonic()
-
-                def log_llm_response(content):
-                    emit_message(
-                        on_message,
-                        attempt=decision_number,
-                        step=decision_number,
-                        sender="llm",
-                        recipient="coordinator",
-                        kind="response",
-                        content=content,
-                        response_seconds=round(time.monotonic() - response_started, 3),
+                else:
+                    decision = self._request_decision(
+                        base, attempts, feedback, decision_number, on_message
                     )
-
-                try:
-                    decision = self.ask_llm(messages)
-                except ProtocolError as exc:
-                    log_llm_response({"status": "protocol_error", "error": str(exc)})
-                    raise
-                except TransportTimeout as exc:
-                    log_llm_response({"status": "timeout", "error": str(exc)})
-                    raise
-                except TransportError as exc:
-                    log_llm_response({"status": "transport_error", "error": str(exc)})
-                    raise
-                log_llm_response(decision)
                 feedback = ""
 
                 if decision.get("type") == "answer":
@@ -186,6 +226,13 @@ class Coordinator:
                     response_seconds=round(time.monotonic() - response_started, 3),
                 )
                 attempts.append(compact)
+                if fresh_lookup and attempt_number == 1 and compact["status"] == "success":
+                    result = {
+                        "type": "final",
+                        "status": "success",
+                        "summary": compact["summary"],
+                    }
+                    break
                 if compact["timed_out"]:
                     recovery_target = (agent_name, delegated.strip().casefold())
                     if on_progress:

@@ -240,6 +240,35 @@ def test_coordinator_answers_informational_question(monkeypatch):
     runner.assert_not_called()
 
 
+def test_coordinator_routes_fresh_lookup_without_planning_round(monkeypatch):
+    runner = Mock(return_value={
+        "status": "success",
+        "summary": "Актуальный курс биткоина: 79695 USD",
+        "files": [],
+        "commands": [{"command": "fetch price", "success": True}],
+    })
+    coordinator = Coordinator(COORDINATOR_SETTINGS, {"executor": runner})
+    ask_llm = Mock()
+    monkeypatch.setattr(coordinator, "ask_llm", ask_llm)
+    messages = []
+
+    result = coordinator.run("Какой сейчас курс биткойна?", on_message=messages.append)
+
+    assert result == {
+        "type": "final",
+        "status": "success",
+        "summary": "Актуальный курс биткоина: 79695 USD",
+    }
+    ask_llm.assert_not_called()
+    delegated = runner.call_args.args[0]
+    assert "Не создавай файл" in delegated
+    assert "Не повторяй успешный запрос" in delegated
+    assert [(item["sender"], item["recipient"]) for item in messages] == [
+        ("coordinator", "executor"),
+        ("executor", "coordinator"),
+    ]
+
+
 def test_coordinator_rejects_answer_after_delegation(monkeypatch):
     decisions = iter([
         {"type": "delegate", "agent": "executor", "task": "inspect"},
@@ -313,6 +342,34 @@ def test_tool_agent_logs_each_llm_step(monkeypatch, tool_agent):
     ]
     assert "Ты Executor" not in messages[0]["content"]
     assert json.loads(messages[1]["content"])["arguments"]["reason"] == "inspect workspace"
+
+
+def test_successful_external_request_prompts_immediate_finish(monkeypatch, tool_agent):
+    calls = iter([
+        tool_call(
+            "run_command",
+            command="printf 79695 # https://api.example/price",
+            reason="fetch current price",
+        ),
+        tool_call(
+            "finish",
+            status="success",
+            summary="BTC is 79695 USD",
+            reason="current value received",
+        ),
+    ])
+    snapshots = []
+
+    def ask(messages, timeout):
+        snapshots.append(json.loads(messages[-1]["content"]))
+        return next(calls)
+
+    monkeypatch.setattr(tool_agent, "ask_llm", ask)
+    result = tool_agent.run("fetch current BTC price")
+
+    assert result["status"] == "success"
+    assert "do not request the same volatile data again" in snapshots[1]["feedback"]
+    assert "call finish now" in snapshots[1]["feedback"]
 
 
 def test_session_and_boundary(monkeypatch):

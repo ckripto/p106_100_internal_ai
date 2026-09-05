@@ -445,5 +445,19 @@ class ToolAgent:
             state.receipts.append({"tool": data.get("tool"), "target": identity, "result": tool_result})
             if time.monotonic() >= deadline:
                 return state.result("failed", f"{self.settings.name} timed out after {timeout:g} seconds", True)
-            feedback = ""
+            if tool_result["success"]:
+                if data.get("tool") == "run_command" and any(
+                    marker in arguments.get("command", "") for marker in ("http://", "https://")
+                ):
+                    feedback = (
+                        "The external request succeeded. Use its returned value and do not request "
+                        "the same volatile data again. If this satisfies the task, call finish now."
+                    )
+                else:
+                    feedback = (
+                        "The last tool succeeded. If its evidence satisfies the task, call finish "
+                        "now instead of repeating completed work."
+                    )
+            else:
+                feedback = ""
         return state.result("failed", f"{self.settings.name} step limit exceeded")
