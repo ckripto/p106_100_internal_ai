@@ -17,7 +17,8 @@ SETTINGS = AgentSettings(
         response_timeout=float(os.environ.get("EXECUTOR_LLM_RESPONSE_TIMEOUT", "300")),
     ),
     attempt_timeout=float(os.environ.get("EXECUTOR_TIMEOUT", "300")),
-    command_timeout=float(os.environ.get("EXECUTOR_COMMAND_TIMEOUT", "30")),
+    command_timeout=float(os.environ.get("EXECUTOR_COMMAND_TIMEOUT", "180")),
     step_limit=int(os.environ.get("EXECUTOR_STEP_LIMIT", "60")),
     chunk_size=int(os.environ.get("EXECUTOR_CHUNK_SIZE", "600")),
+    redundant_path_prefix="workspace",
 )

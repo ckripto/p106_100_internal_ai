@@ -117,6 +117,8 @@ def test_paths(tool_agent):
     for path in ["../x", "/tmp/x", "link/x"]:
         with pytest.raises(ProtocolError):
             state.safe_path(path)
+    with pytest.raises(ProtocolError, match="remove the workspace/ prefix"):
+        state.safe_path("workspace/a.py")
 
 
 def test_commands(tool_agent):
@@ -128,6 +130,7 @@ def test_commands(tool_agent):
     assert result["success"] and result["output_truncated"]
     assert len(result["stdout"]) < 650
     assert not state.execute(tool_call("run_command", command="exit 7"))["success"]
+    assert not state.execute(tool_call("run_command", command="false | tail -1"))["success"]
 
     fast_settings = replace(tool_agent.settings, command_timeout=0.1)
     fast_state = ToolState(fast_settings)

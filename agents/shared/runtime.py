@@ -40,6 +40,7 @@ class AgentSettings:
     snapshot_limit: int = 3000
     instruction_paths: tuple[Path, ...] = ()
     excluded_names: frozenset[str] = field(default_factory=frozenset)
+    redundant_path_prefix: str | None = None
 
 
 def _tool(name, description, properties, required):
@@ -111,6 +112,11 @@ class ToolState:
         if not isinstance(filename, str) or not filename or len(filename) > 240:
             raise ProtocolError("Invalid path")
         root = self.settings.root.resolve()
+        prefix = self.settings.redundant_path_prefix
+        if prefix and Path(filename).parts[:1] == (prefix,):
+            raise ProtocolError(
+                f"Paths are already relative to {root}; remove the {prefix}/ prefix"
+            )
         path = (root / filename).resolve()
         if not path.is_relative_to(root) or path == root:
             raise ProtocolError("Path must be inside the configured root")
@@ -133,8 +139,7 @@ class ToolState:
 
     def _run_command(self, command):
         process = subprocess.Popen(
-            command,
-            shell=True,
+            ["/bin/bash", "-o", "pipefail", "-c", command],
             cwd=self.settings.root,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
