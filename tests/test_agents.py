@@ -1,5 +1,8 @@
 import json
+import subprocess
+import sys
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -9,6 +12,8 @@ from agents.coordinator.agent import Coordinator
 from agents.coordinator.settings import SETTINGS as COORDINATOR_SETTINGS
 from agents.developer.agent import AGENT as DEVELOPER_AGENT
 from agents.developer.settings import SETTINGS as DEVELOPER_SETTINGS
+from agents.executor.agent import AGENT as EXECUTOR_AGENT
+from agents.executor.runtime import FILE_SCRIPT, LIST_SCRIPT, PREPARE_SCRIPT, SSHToolState
 from agents.executor.settings import SETTINGS as EXECUTOR_SETTINGS
 from agents.shared import ProtocolError, ToolAgent, ToolState, TransportTimeout
 from agents.shared import protocol
@@ -119,6 +124,74 @@ def test_paths(tool_agent):
             state.safe_path(path)
     with pytest.raises(ProtocolError, match="remove the workspace/ prefix"):
         state.safe_path("workspace/a.py")
+
+
+def test_executor_uses_remote_ssh_state():
+    assert EXECUTOR_AGENT.state_class is SSHToolState
+
+
+def test_ssh_state_routes_tools_to_remote(monkeypatch):
+    settings = replace(
+        EXECUTOR_SETTINGS,
+        root=Path("/root/agents-workspace"),
+        ssh_target="root@executor.example",
+    )
+    state = SSHToolState(settings)
+    remote_python = Mock(
+        side_effect=["", "", "abc", '{"success":true,"files":[],"truncated":false}']
+    )
+    monkeypatch.setattr(state, "_remote_python", remote_python)
+    state.prepare()
+    state._write_file("a.txt", "abc")
+    assert state._read_file("a.txt", 0) == "abc"
+    assert state._list_files()["files"] == []
+    assert [call.args[0] for call in remote_python.call_args_list] == [
+        PREPARE_SCRIPT, FILE_SCRIPT, FILE_SCRIPT, LIST_SCRIPT,
+    ]
+    assert remote_python.call_args_list[1].kwargs["input_bytes"] == b"abc"
+
+    run_process = Mock(return_value={"success": True, "returncode": 0, "timed_out": False})
+    monkeypatch.setattr(state, "_run_process", run_process)
+    assert state._run_command("pwd")["success"]
+    arguments, cwd = run_process.call_args.args
+    assert arguments[0] == "ssh" and "root@executor.example" in arguments
+    assert "/root/agents-workspace" in arguments[-1] and "pwd" in arguments[-1]
+    assert cwd is None
+
+
+def test_remote_file_scripts_are_atomic_and_bounded(tmp_path):
+    root = tmp_path / "remote"
+    subprocess.run([sys.executable, "-c", PREPARE_SCRIPT, str(root)], check=True)
+    subprocess.run(
+        [sys.executable, "-c", FILE_SCRIPT, "write", str(root), "a.txt"],
+        input="привет".encode(),
+        check=True,
+    )
+    read = subprocess.run(
+        [sys.executable, "-c", FILE_SCRIPT, "read", str(root), "a.txt", "0", "20"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert read.stdout == "привет"
+    listed = subprocess.run(
+        [sys.executable, "-c", LIST_SCRIPT, str(root), "[]"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(listed.stdout) == {
+        "success": True,
+        "files": ["a.txt"],
+        "truncated": False,
+    }
+    escaped = subprocess.run(
+        [sys.executable, "-c", FILE_SCRIPT, "read", str(root), "../outside", "0", "20"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert escaped.returncode != 0
 
 
 def test_commands(tool_agent):

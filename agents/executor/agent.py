@@ -2,9 +2,10 @@
 
 from agents.shared import ToolAgent
 
+from .runtime import SSHToolState
 from .settings import SETTINGS
 
-AGENT = ToolAgent(SETTINGS)
+AGENT = ToolAgent(SETTINGS, state_class=SSHToolState)
 
 
 def run_agent(task, on_progress=None, on_message=None, attempt=1, timeout=None):

@@ -41,6 +41,8 @@ class AgentSettings:
     instruction_paths: tuple[Path, ...] = ()
     excluded_names: frozenset[str] = field(default_factory=frozenset)
     redundant_path_prefix: str | None = None
+    ssh_target: str | None = None
+    ssh_connect_timeout: int = 10
 
 
 def _tool(name, description, properties, required):
@@ -108,6 +110,9 @@ class ToolState:
         self.receipts = []
         self.effects = 0
 
+    def prepare(self):
+        self.settings.root.mkdir(parents=True, exist_ok=True)
+
     def safe_path(self, filename):
         if not isinstance(filename, str) or not filename or len(filename) > 240:
             raise ProtocolError("Invalid path")
@@ -121,6 +126,10 @@ class ToolState:
         if not path.is_relative_to(root) or path == root:
             raise ProtocolError("Path must be inside the configured root")
         return path
+
+    def path_key(self, filename):
+        path = self.safe_path(filename)
+        return str(path.relative_to(self.settings.root.resolve()))
 
     def _write_file(self, relative_path, content):
         target = self.safe_path(relative_path)
@@ -137,10 +146,15 @@ class ToolState:
             if temporary_name and os.path.exists(temporary_name):
                 os.unlink(temporary_name)
 
-    def _run_command(self, command):
+    def _read_file(self, relative_path, offset):
+        with self.safe_path(relative_path).open(encoding="utf-8") as stream:
+            stream.read(offset)
+            return stream.read(self.settings.chunk_size + 1)
+
+    def _run_process(self, arguments, cwd):
         process = subprocess.Popen(
-            ["/bin/bash", "-o", "pipefail", "-c", command],
-            cwd=self.settings.root,
+            arguments,
+            cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -187,6 +201,12 @@ class ToolState:
             "output_truncated": any(totals[key] > 600 for key in totals),
         }
 
+    def _run_command(self, command):
+        return self._run_process(
+            ["/bin/bash", "-o", "pipefail", "-c", command],
+            self.settings.root,
+        )
+
     def _list_files(self):
         files = []
         for directory, child_directories, names in os.walk(self.settings.root):
@@ -224,8 +244,7 @@ class ToolState:
             self.effects += 1
             return self._list_files()
 
-        path = self.safe_path(string(arguments, "path", 240))
-        key = str(path.relative_to(self.settings.root.resolve()))
+        key = self.path_key(string(arguments, "path", 240))
         offset = arguments.get("offset")
         if type(offset) is not int or offset < 0:
             raise ProtocolError("offset must be a nonnegative integer")
@@ -235,9 +254,7 @@ class ToolState:
             if key in self.pending:
                 content = self.pending[key][offset:offset + self.settings.chunk_size + 1]
             else:
-                with path.open(encoding="utf-8") as stream:
-                    stream.read(offset)
-                    content = stream.read(self.settings.chunk_size + 1)
+                content = self._read_file(key, offset)
             self.effects += 1
             return {
                 "success": True,
@@ -293,8 +310,9 @@ class ToolState:
 
 
 class ToolAgent:
-    def __init__(self, settings):
+    def __init__(self, settings, state_class=ToolState):
         self.settings = settings
+        self.state_class = state_class
         self.tools = build_tools(settings.chunk_size)
         self.system_prompt = self._load_system_prompt()
 
@@ -324,14 +342,17 @@ class ToolAgent:
             raise ProtocolError("Malformed tool call") from None
 
     def run(self, task, on_progress=None, on_message=None, attempt=1, timeout=None):
-        self.settings.root.mkdir(parents=True, exist_ok=True)
         timeout = self.settings.attempt_timeout if timeout is None else timeout
         deadline = time.monotonic() + max(0, timeout)
-        state = ToolState(self.settings, deadline)
-        feedback = ""
-        protocol_errors = 0
+        state = self.state_class(self.settings, deadline)
         if not isinstance(task, str) or not task.strip() or len(task) > self.settings.task_limit:
             return state.result("failed", f"Task must contain 1–{self.settings.task_limit} characters")
+        try:
+            state.prepare()
+        except (OSError, ProtocolError, ValueError) as exc:
+            return state.result("failed", f"Tool environment unavailable: {clip(exc, 300)}")
+        feedback = ""
+        protocol_errors = 0
         for step_number in range(1, self.settings.step_limit + 1):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
