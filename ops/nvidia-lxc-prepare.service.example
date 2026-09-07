@@ -1,0 +1,12 @@
+[Unit]
+Description=Prepare NVIDIA devices for GPU-backed LXC guests
+After=systemd-modules-load.service systemd-udev-trigger.service
+Before=pve-guests.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nvidia-lxc-prepare
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

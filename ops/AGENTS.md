@@ -4,6 +4,10 @@
 `llama-server.service.example` и `llama-server.env.example` — шаблоны inference.
 Локальные копии без суффикса и эксплуатационные отчёты игнорируются Git.
 
+`nvidia-lxc-prepare.example` и одноимённый unit создают и проверяют NVIDIA device
+nodes до запуска LXC. `pve-guests-nvidia.conf.example` устанавливается как drop-in
+для `pve-guests.service`, чтобы контейнеры не стартовали при неготовом GPU.
+
 Unit web-service должен запускать package entry point из `/opt/agents`, использовать
 venv, абсолютный путь production БД, `Restart=on-failure`, process-wide kill и
 закрытый umask. Настройки каждого агента задаются отдельными environment variables.
