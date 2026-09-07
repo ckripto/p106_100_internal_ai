@@ -4,8 +4,19 @@ set -eu
 modprobe nvidia
 modprobe nvidia_uvm
 
-attempt=0
-while [ "$attempt" -lt 30 ]; do
+remaining_attempts=240
+
+wait_or_fail() {
+    message=$1
+    if [ "$remaining_attempts" -le 0 ]; then
+        echo "$message" >&2
+        exit 1
+    fi
+    remaining_attempts=$((remaining_attempts - 1))
+    sleep 1
+}
+
+while :; do
     found_gpu=0
     all_gpu_nodes_ready=1
     for information in /proc/driver/nvidia/gpus/*/information; do
@@ -22,34 +33,19 @@ while [ "$attempt" -lt 30 ]; do
     if [ "$found_gpu" -eq 1 ] && [ "$all_gpu_nodes_ready" -eq 1 ]; then
         break
     fi
-    attempt=$((attempt + 1))
-    sleep 1
+    wait_or_fail "NVIDIA GPU device nodes did not become ready"
 done
 
-if [ "$found_gpu" -ne 1 ] || [ "$all_gpu_nodes_ready" -ne 1 ]; then
-    echo "NVIDIA GPU device nodes did not become ready" >&2
-    exit 1
-fi
-
-attempt=0
-until nvidia-modprobe -u >/dev/null 2>&1 &&
+# Per-GPU -c calls do not create nvidiactl; the default and -u modes create
+# the control and UVM nodes respectively on a cold boot.
+until nvidia-modprobe >/dev/null 2>&1 &&
+    nvidia-modprobe -u >/dev/null 2>&1 &&
     test -c /dev/nvidiactl &&
     test -c /dev/nvidia-uvm &&
     test -c /dev/nvidia-uvm-tools; do
-    attempt=$((attempt + 1))
-    if [ "$attempt" -ge 30 ]; then
-        echo "NVIDIA control/UVM device nodes did not become ready" >&2
-        exit 1
-    fi
-    sleep 1
+    wait_or_fail "NVIDIA control/UVM device nodes did not become ready"
 done
 
-attempt=0
 until nvidia-smi --query-gpu=index --format=csv,noheader >/dev/null 2>&1; do
-    attempt=$((attempt + 1))
-    if [ "$attempt" -ge 30 ]; then
-        echo "NVIDIA GPUs did not become responsive" >&2
-        exit 1
-    fi
-    sleep 1
+    wait_or_fail "NVIDIA GPUs did not become responsive"
 done

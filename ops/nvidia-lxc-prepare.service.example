@@ -7,7 +7,7 @@ Before=pve-guests.service
 Type=oneshot
 ExecStart=/usr/local/sbin/nvidia-lxc-prepare
 RemainAfterExit=yes
-TimeoutStartSec=120
+TimeoutStartSec=300
 
 [Install]
 WantedBy=multi-user.target
