@@ -4,19 +4,52 @@ set -eu
 modprobe nvidia
 modprobe nvidia_uvm
 
-found_gpu=0
-for information in /proc/driver/nvidia/gpus/*/information; do
-    [ -f "$information" ] || continue
-    minor=$(awk -F: '/^Device Minor:/ { gsub(/[[:space:]]/, "", $2); print $2 }' "$information")
-    [ -n "$minor" ] || continue
-    nvidia-modprobe -c "$minor"
-    test -c "/dev/nvidia$minor"
-    found_gpu=1
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+    found_gpu=0
+    all_gpu_nodes_ready=1
+    for information in /proc/driver/nvidia/gpus/*/information; do
+        [ -f "$information" ] || continue
+        minor=$(awk -F: '/^Device Minor:/ { gsub(/[[:space:]]/, "", $2); print $2 }' "$information")
+        [ -n "$minor" ] || continue
+        found_gpu=1
+        if ! nvidia-modprobe -c "$minor" >/dev/null 2>&1 ||
+            ! test -c "/dev/nvidia$minor"; then
+            all_gpu_nodes_ready=0
+        fi
+    done
+
+    if [ "$found_gpu" -eq 1 ] && [ "$all_gpu_nodes_ready" -eq 1 ]; then
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
 done
 
-[ "$found_gpu" -eq 1 ]
-nvidia-modprobe -u
-test -c /dev/nvidiactl
-test -c /dev/nvidia-uvm
-test -c /dev/nvidia-uvm-tools
-nvidia-smi --query-gpu=index --format=csv,noheader >/dev/null
+if [ "$found_gpu" -ne 1 ] || [ "$all_gpu_nodes_ready" -ne 1 ]; then
+    echo "NVIDIA GPU device nodes did not become ready" >&2
+    exit 1
+fi
+
+attempt=0
+until nvidia-modprobe -u >/dev/null 2>&1 &&
+    test -c /dev/nvidiactl &&
+    test -c /dev/nvidia-uvm &&
+    test -c /dev/nvidia-uvm-tools; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 30 ]; then
+        echo "NVIDIA control/UVM device nodes did not become ready" >&2
+        exit 1
+    fi
+    sleep 1
+done
+
+attempt=0
+until nvidia-smi --query-gpu=index --format=csv,noheader >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 30 ]; then
+        echo "NVIDIA GPUs did not become responsive" >&2
+        exit 1
+    fi
+    sleep 1
+done
