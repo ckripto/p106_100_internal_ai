@@ -2,6 +2,9 @@
 
 `agents-web.service.example` — шаблон production unit приложения;
 `llama-server.service.example` и `llama-server.env.example` — шаблоны inference.
+`LLAMA_CONTEXT_SIZE` задаёт общий KV-контекст backend и делится между
+`LLAMA_PARALLEL` слотами; при изменении числа слотов сохраняй требуемый контекст
+каждого запроса явным пересчётом общего размера.
 Локальные копии без суффикса и эксплуатационные отчёты игнорируются Git.
 
 `nvidia-lxc-prepare.example` и одноимённый unit создают и проверяют NVIDIA device
