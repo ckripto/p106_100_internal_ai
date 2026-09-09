@@ -5,6 +5,9 @@
 `LLAMA_CONTEXT_SIZE` задаёт общий KV-контекст backend и делится между
 `LLAMA_PARALLEL` слотами; при изменении числа слотов сохраняй требуемый контекст
 каждого запроса явным пересчётом общего размера.
+`LLAMA_CACHE_RAM` ограничивает host-side prompt cache, а `LLAMA_LOAD_MODE=dio`
+не оставляет загруженные в GPU веса GGUF в файловом page cache. Активный KV-cache
+по умолчанию остаётся на GPU.
 Локальные копии без суффикса и эксплуатационные отчёты игнорируются Git.
 
 `nvidia-lxc-prepare.example` и одноимённый unit создают и проверяют NVIDIA device
